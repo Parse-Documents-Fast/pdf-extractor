@@ -11,3 +11,6 @@ Recibe los bytes de un PDF ya validado y devuelve su contenido **estructurado** 
 
 ## Depende de
 Que el shape del JSON estructurado esté acordado con quien construya `pdf-transformator` antes de arrancar — es el contrato más importante de todo el pipeline de PDF.
+
+## Actualización — transporte (ADR-0004)
+Este servicio ya no expone un endpoint HTTP — es un consumer de Redis Streams. Consume jobs de `queue:extraction` (grupo de consumidores, con `XACK` al terminar cada job), y publica el resultado en `queue:extraction-results` (éxito o error, según ADR-0001). La función núcleo de extracción (`ExtractStructure`, por ADR-0004) no cambia — solo cambia el adaptador que la llama, que pasa de ser un handler HTTP a ser un loop de consumo de stream.
