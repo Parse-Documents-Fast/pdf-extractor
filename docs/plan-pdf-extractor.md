@@ -1,17 +1,95 @@
-# plan.md — pdf-extractor
+# Plan de Desarrollo — PDF Extractor Microservice
 
-## Qué hay que construir
-Absorbe lo que iba a ser `pdf-transformator` (ADR-0005). Recibe los bytes de un PDF ya validado y devuelve **Markdown** — dos funciones núcleo internas, sin salto de red entre ellas: extraer estructura (texto + tamaño de fuente + posición/tabla) y mapear esa estructura a Markdown. La decisión clave sigue siendo la misma: nunca aplanar el PDF a texto plano antes de tiempo, porque esa información estructural es la que permite mapear a Markdown de forma confiable en vez de heurística sobre texto ya aplanado.
+## Contexto
+Microservicio que absorbe responsabilidades de `pdf-transformator` (ADR-0005). Funciona como **consumer de Redis Streams** (no expone HTTP). Recibe PDFs validados de `pdf-main` vía `queue:extraction` y publica resultados en `queue:extraction-results`.
 
-## Cómo construirlo, en orden
-1. Elegir entre `unipdf` y `pdfcpu` — la que dé mejor acceso a metadata de fuente/posición/tabla, probando con un par de PDFs reales de prueba (uno simple, uno con tabla).
-2. `ExtractStructure()`: extraer una lista de bloques, cada uno con su texto, tamaño de fuente, y si pertenece a una tabla (y en qué celda).
-3. `EstructuraAMarkdown()`: mapear esos bloques a sintaxis Markdown — tamaño de fuente por encima de cierto umbral → `#`/`##`; bloques de tabla → sintaxis de tabla Markdown (`|...|`); el resto → párrafo plano.
-4. Probar contra los mismos PDFs de prueba (simple + con tabla) y ajustar los umbrales de tamaño de fuente según lo que salga mal — es la parte que más iteración va a necesitar.
-5. Manejar el caso de PDF corrupto o sin texto extraíble con una excepción de dominio propia, no un string vacío silencioso (`PdfExtractionError`, adaptado a Go).
+## Decisión Clave
+Nunca aplanar el PDF a texto plano antes de tiempo. Mantener estructura (fuente, posición, tabla) para mapear confiablemente a Markdown en vez de heurísticas sobre texto ya aplanado.
 
-## Transporte (ADR-0004 + ADR-0005)
-Consumer de Redis Streams, no expone HTTP. Consume jobs de `queue:extraction` (consumer group, `XACK` al terminar), publica el resultado en `queue:extraction-results` — ahora con el Markdown ya armado, no una estructura intermedia ni HTML.
+---
 
-## Ya no aplica
-`pdf-transformator` como repo separado — se descarta, esta responsabilidad vive acá adentro como una segunda función núcleo, no como otro servicio de red.
+## Fase 1: Estructura Base + Redis Consumer
+
+- [ ] Crear estructura: `dev/`, `tests/`, `docs/`
+- [ ] Setup: `pyproject.toml`, `.env.example`, `README.md`
+- [ ] Configurar FastAPI (solo para health checks/metrics)
+- [ ] Configurar `redis-py` para Streams
+- [ ] Crear `dev/config.py` con variables de entorno (Redis URI, MongoDB URI, etc)
+- [ ] Implementar consumer loop que escucha `queue:extraction`
+
+---
+
+## Fase 2: Extracción Estructurada de PDF
+
+**Elegir librería:** `unipdf` o `pdfcpu` — la que dé mejor acceso a metadata (tamaño de fuente, posición, tablas)
+
+- [ ] Comparar con PDFs de prueba (simple + con tabla)
+- [ ] Implementar `ExtractStructure(pdf_bytes)`:
+  - Retorna lista de **bloques**, cada uno con:
+    - Texto
+    - Tamaño de fuente
+    - Posición (para detectar tablas)
+    - Indicador de celda de tabla
+- [ ] Manejo de errores: `PdfExtractionError` (excepción de dominio)
+- [ ] Caso bordes: PDF corrupto, sin texto extraíble
+
+---
+
+## Fase 3: Mapeo a Markdown
+
+- [ ] Implementar `MapStructureToMarkdown(blocks)`:
+  - Fuente tamaño > umbral → `#` / `##` / `###`
+  - Bloques de tabla → sintaxis Markdown (`|...|`)
+  - Resto → párrafo plano
+- [ ] Ajustar umbrales de tamaño de fuente (iteración con PDFs reales)
+- [ ] Tests contra PDFs simple + tabla
+
+---
+
+## Fase 4: Persistencia en MongoDB
+
+- [ ] Modelo `PdfDocument` en MongoDB (con Markdown generado)
+- [ ] `PdfRepository` (interfaz) + `MongoPdfRepository` (implementación)
+- [ ] Guardar resultado procesado en MongoDB con:
+  - `pdf_id`
+  - `filename`
+  - `markdown_content`
+  - `extracted_at`
+  - `status` (success/failed)
+
+---
+
+## Fase 5: Redis Streams Integration
+
+- [ ] Consumer que escucha `queue:extraction`:
+  - Lee: `pdf_id`, `filename`, `content_base64`
+  - Decodifica base64 → bytes
+  - Procesa (Extract + Map)
+  - Publica en `queue:extraction-results` con Markdown resultado
+  - `XACK` al terminar
+- [ ] Consumer group setup: `pdf-extractor-group`
+- [ ] Manejo de reintentos y dead-letter queue en caso de error
+
+---
+
+## Fase 6: Endpoints Secundarios (Health Check + Metrics)
+
+- [ ] GET `/health` → status del servicio
+- [ ] GET `/metrics` → metrics de Prometheus (PDFs procesados, errores, latencia)
+
+---
+
+## Fase 7: Tests + Documentación
+
+- [ ] Tests unitarios: `ExtractStructure`, `MapStructureToMarkdown`
+- [ ] Tests de integración: consumer loop + Redis
+- [ ] Fixtures: PDFs simple + tabla
+- [ ] README con setup, envs, cómo correr
+- [ ] Architecture docs en `/docs`
+
+---
+
+## Ya No Aplica
+- `pdf-transformator` como repo separado — vive acá como responsabilidad núcleo
+- Endpoints REST para PDF upload (eso lo maneja `pdf-main`)
+- HTTP como transporte principal (Redis Streams es el contrato)
