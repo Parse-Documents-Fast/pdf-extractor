@@ -1,0 +1,286 @@
+version: '3.8'
+
+# Docker Compose para Evaluación del Trabajo Práctico (TP)
+# 
+# Este archivo configura el microservicio con:
+# - Límites estrictos de CPU y memoria por contenedor
+# - Escalado horizontal configurado (máximo 5 réplicas)
+# - Variables de entorno optimizadas para benchmark
+# - Igual a: docker compose -f docker-compose.tp.yml up --build
+
+services:
+  # =============================================================================
+  # API - Servicio Principal (Escalable)
+  # =============================================================================
+  api:
+    build:
+      context: ./pdf-extractor-main
+      dockerfile: Dockerfile
+    # Reemplazar 'api' por 'api-1', 'api-2', etc. en modo de réplicas
+    container_name: pdf-api
+    ports:
+      - "8080:8080"
+    environment:
+      # Configuración de red
+      - HTTP_ADDR=:8080
+      
+      # Configuración de logging
+      - LOG_LEVEL=warn  # Reducir verbosidad en benchmark
+      
+      # Configuración de conexiones a dependencias
+      - REDIS_URI=redis://redis:6379
+      - MONGO_URI=mongodb://mongo:27017
+      - MONGO_DB=pdf-extractor
+      - MONGO_COLLECTION=documents
+      
+      # Configuración de optimización de recursos
+      - GOMAXPROCS=1  # Limitar a 1 CPU lógica para justicia en benchmark
+      - GOMEMLIMIT=256MiB  # Límite de memoria del runtime Go
+      
+      # Timeouts y configuración de buffer
+      - REQUEST_TIMEOUT=30s
+      - IDLE_TIMEOUT=90s
+      - MAX_HEADER_BYTES=1048576  # 1MB
+      
+    depends_on:
+      redis:
+        condition: service_healthy
+      mongo:
+        condition: service_healthy
+    
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    
+    restart: unless-stopped
+    networks:
+      - pdf-network
+    
+    # ==========================================================================
+    # LÍMITES DE HARDWARE (Resource Constraints)
+    # ==========================================================================
+    deploy:
+      resources:
+        limits:
+          # Máximo 1 CPU (1000 millicores)
+          cpus: '1.0'
+          # Máximo 512 MB de RAM
+          memory: 512M
+        reservations:
+          # Reserva mínima garantizada
+          cpus: '0.5'
+          memory: 256M
+    
+    # Estrategia de reinicio
+    stop_grace_period: 10s
+
+  # =============================================================================
+  # CONSUMER - Servicio de Procesamiento en Background (Escalable)
+  # Nota: El archivo Dockerfile.consumer aún no existe en el proyecto.
+  # Se comenta para demostrar la estructura. Descomentar cuando esté disponible.
+  # =============================================================================
+  # consumer:
+  #   build:
+  #     context: ./pdf-extractor-main
+  #     dockerfile: Dockerfile.consumer
+  #   container_name: pdf-consumer
+  #   environment:
+  #     - REDIS_URI=redis://redis:6379
+  #     - MONGO_URI=mongodb://mongo:27017
+  #     - MONGO_DB=pdf-extractor
+  #     - MONGO_COLLECTION=documents
+  #     - STREAM_EXTRACTION=queue:extraction
+  #     - STREAM_RESULTS=queue:extraction-results
+  #     - STREAM_DLQ=queue:extraction-dlq
+  #     - CONSUMER_GROUP=pdf-extractor-group
+  #     - CONSUMER_NAME=pdf-consumer-1
+  #     - WORKER_CONCURRENCY=2
+  #     - MAX_RETRIES=3
+  #     - PDF_MAX_BYTES=20971520  # 20 MB
+  #     - EXTRACTION_TIMEOUT=30s
+  #     - LOG_LEVEL=warn
+  #     - GOMAXPROCS=1
+  #     - GOMEMLIMIT=256MiB
+  #   depends_on:
+  #     redis:
+  #       condition: service_healthy
+  #     mongo:
+  #       condition: service_healthy
+  #   restart: unless-stopped
+  #   networks:
+  #     - pdf-network
+  #   deploy:
+  #     resources:
+  #       limits:
+  #         cpus: '1.0'
+  #         memory: 512M
+  #       reservations:
+  #         cpus: '0.5'
+  #         memory: 256M
+
+  # =============================================================================
+  # REDIS - Cache/Queue Backend
+  # =============================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: pdf-redis
+    ports:
+      - "6379:6379"
+    
+    command: redis-server --maxmemory 256m --maxmemory-policy allkeys-lru
+    
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    
+    restart: unless-stopped
+    networks:
+      - pdf-network
+    
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+
+  # =============================================================================
+  # MONGODB - Base de Datos Persistente
+  # =============================================================================
+  mongo:
+    image: mongo:7
+    container_name: pdf-mongo
+    ports:
+      - "27017:27017"
+    
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=admin
+      - MONGO_INITDB_ROOT_PASSWORD=password
+    
+    # Configurar MongoDB para benchmark
+    command: >
+      --wdtimeout=5000
+      --syncdelay=60
+      --maxConns=100
+      --wiredTigerCacheSizeGB=0.25
+    
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    
+    restart: unless-stopped
+    networks:
+      - pdf-network
+    
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+
+  # =============================================================================
+  # BENCHMARK - Script de Pruebas de Carga (k6)
+  # =============================================================================
+  benchmark:
+    image: grafana/k6:latest
+    container_name: pdf-benchmark
+    
+    volumes:
+      - ./pdf-extractor-main/docs/benchmark.js:/scripts/benchmark.js:ro
+    
+    # Configuración por defecto para benchmark
+    environment:
+      # Spike test: 10 VUs durante 30s
+      - K6_VUS=10
+      - K6_DURATION=30s
+      
+      # Thresholds para validación de SLOs
+      - K6_THRESHOLDS_HTTP_REQ_DURATION_P95=500
+      - K6_THRESHOLDS_HTTP_REQ_DURATION_P99=1000
+      - K6_THRESHOLDS_HTTP_REQ_FAILED_RATE=0.1
+    
+    command: run /scripts/benchmark.js
+    
+    depends_on:
+      api:
+        condition: service_healthy
+    
+    restart: "no"
+    networks:
+      - pdf-network
+
+# =============================================================================
+# NETWORK - Red interna para comunicación entre servicios
+# =============================================================================
+networks:
+  pdf-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+
+# =============================================================================
+# NOTAS SOBRE ESCALADO HORIZONTAL
+# =============================================================================
+#
+# OPCIÓN 1: Escalar usando docker-compose (no recomendado en producción)
+#   docker-compose -f docker-compose.tp.yml up --scale api=5
+#
+# OPCIÓN 2: Usar un balanceador de carga (RECOMENDADO)
+#   Ver abajo el ejemplo de nginx para distribuir carga entre 5 réplicas.
+#
+# OPCIÓN 3: Usar docker swarm o Kubernetes
+#   Fuera del scope de este TP, pero la configuración es escalable.
+
+# =============================================================================
+# CONFIGURACIÓN ALTERNATIVA CON BALANCEADOR DE CARGA (nginx)
+# =============================================================================
+# 
+# Descomentar la siguiente sección y modificar 'docker-compose.tp.yml'
+# para incluir un reverse proxy que distribuya tráfico entre réplicas.
+#
+# services:
+#   lb:  # Load Balancer
+#     image: nginx:alpine
+#     container_name: pdf-lb
+#     ports:
+#       - "80:80"
+#     volumes:
+#       - ./nginx.conf:/etc/nginx/nginx.conf:ro
+#     depends_on:
+#       - api-1
+#       - api-2
+#       - api-3
+#       - api-4
+#       - api-5
+#     networks:
+#       - pdf-network
+#
+#   api-1:
+#     build: ...
+#     container_name: pdf-api-1
+#     # Sin puerto expuesto, solo acceso interno via load balancer
+#     networks:
+#       - pdf-network
+#     deploy:
+#       resources:
+#         limits:
+#           cpus: '1.0'
+#           memory: 512M
+#
+#   api-2:
+#     # Similar a api-1
+#   api-3:
+#     # Similar a api-1
+#   api-4:
+#     # Similar a api-1
+#   api-5:
+#     # Similar a api-1
