@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
 	"sync"
 	"time"
 
@@ -39,7 +38,7 @@ func New(rdb *redisclient.Client, repo repository.PdfRepository, cfg config.Conf
 }
 
 func (c *Consumer) Run(ctx context.Context) error {
-	if err := c.ensureGroup(ctx); err != nil {
+	if err := EnsureGroup(ctx, c.rdb, c.cfg.StreamExtraction, c.cfg.ConsumerGroup); err != nil {
 		return err
 	}
 
@@ -54,14 +53,6 @@ func (c *Consumer) Run(ctx context.Context) error {
 
 	<-ctx.Done()
 	wg.Wait()
-	return nil
-}
-
-func (c *Consumer) ensureGroup(ctx context.Context) error {
-	err := c.rdb.XGroupCreateMkStream(ctx, c.cfg.StreamExtraction, c.cfg.ConsumerGroup, "$").Err()
-	if err != nil && !strings.Contains(err.Error(), "BUSYGROUP") {
-		return fmt.Errorf("consumer: crear consumer group: %w", err)
-	}
 	return nil
 }
 
