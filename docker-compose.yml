@@ -84,6 +84,21 @@ services:
     networks:
       - pdf-network
 
+  benchmark:
+    image: grafana/k6:latest
+    volumes:
+      - ./docs/benchmark.js:/scripts/benchmark.js:ro
+    environment:
+      - K6_VUS=10
+      - K6_DURATION=30s
+    command: run /scripts/benchmark.js
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      - pdf-network
+
 networks:
   pdf-network:
     driver: bridge
