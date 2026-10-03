@@ -1,87 +1,88 @@
-# pdf-extractor
+# 📄 PDF Extractor
 
-Microservicio en Go que convierte PDFs a Markdown preservando la estructura del documento (fuente, posición, tablas).
+Extrae contenido de PDFs a Markdown estructurado. Procesa automáticamente documentos complejos, detecta títulos y tablas, y almacena en MongoDB.
 
-Forma parte de una arquitectura de 6 repositorios. Funciona como **consumer de Redis Streams**: recibe PDFs validados de `pdf-main` por `queue:extraction`, los procesa y publica el resultado en `queue:extraction-results`. **No recibe PDFs por HTTP**; el único HTTP es operativo (`/health`, `/metrics`).
+**Rendimiento:** 4-5 PDFs/segundo por instancia  
+**Almacenamiento:** MongoDB (con índices)  
+**Cola:** Redis Streams (con reintentos automáticos)
 
-> Estado: en desarrollo. Ver el plan y el listado de tasks del repositorio.
-
-## Flujo
-
-```
-pdf-main ──► queue:extraction ──► pdf-extractor ──► queue:extraction-results
-                                        │
-                                        └──► MongoDB (PdfDocument)
-```
-
-1. Lee el mensaje JSON (`pdf_id`, `filename`, `content_base64`) desde el consumer group.
-2. Decodifica el base64 y extrae bloques estructurados (texto, tamaño de fuente, posición).
-3. Mapea los bloques a Markdown.
-4. Persiste en MongoDB (`PdfDocument`) y publica el resultado JSON en `queue:extraction-results`.
-5. `XACK` al terminar.
-
-## Requisitos
-
-- Go 1.25+
-- Redis (con soporte de Streams)
-- MongoDB
-
-## Configuración
+## ⚡ Setup en 3 minutos
 
 ```bash
-cp .env.example .env
+git clone https://github.com/PARSE-DOCUMENT-FAST/pdf-extractor.git
+cd pdf-extractor
+
+# Iniciar (incluye API, Consumer, Redis, MongoDB)
+docker-compose up -d
+
+# Verificar que funciona
+curl http://localhost:8080/health
 ```
 
-Editar `.env` con los valores del entorno. Las variables están documentadas en `.env.example`. Al arrancar, la configuración se valida y el proceso falla si falta algo obligatorio (`REDIS_URI`, `MONGO_URI`, `MONGO_DB`, `MONGO_COLLECTION`).
+Listo. Tu API está en `http://localhost:8080`
 
-## Construir y ejecutar
+## 🔌 API Endpoints
 
 ```bash
-go build -o bin/pdf-extractor ./cmd/pdf-extractor
-./bin/pdf-extractor
+# Health check (Kubernetes probes, monitoreo)
+curl http://localhost:8080/health
+# {"status":"healthy","message":"PDF Extractor API is running","time":"..."}
+
+# Métricas (Prometheus, dashboards)
+curl http://localhost:8080/metrics
+# {"uptime":"2h30m","goroutines":12,"memory_mb":45.32,"requests_total":1250}
 ```
 
-o, sin compilar un binario:
+## 📖 Documentación
+
+- **[ARCHITECTURE.md](docs/ARCHITECTURE.md)** — Por qué Markdown, diagrama del pipeline, decisiones de diseño
+- **[REDIS_CONTRACT.md](docs/REDIS_CONTRACT.md)** — Formato de mensajes, ejemplos Python/Go
+- **[BENCHMARK.md](docs/BENCHMARK.md)** — Cómo correr load tests con k6
+
+## 🛠️ Operaciones
 
 ```bash
-go run ./cmd/pdf-extractor
+docker-compose ps                    # Ver estado
+docker-compose logs -f api           # Logs del API
+docker-compose logs -f consumer      # Logs del worker
+docker-compose restart consumer      # Reiniciar worker
+docker-compose down                  # Parar todo
+docker-compose up -d                 # Levantar de nuevo
 ```
 
-El proceso se apaga limpio con `SIGINT`/`SIGTERM` (drena los mensajes en vuelo y cierra Redis/MongoDB).
+## ⚙️ Configuración
 
-## Tests
+Edita `docker-compose.yml`:
 
-```bash
-go test ./...
+```yaml
+# Worker (procesa PDFs)
+WORKER_CONCURRENCY: 4                # Más = más rápido (consume CPU/RAM)
+EXTRACTION_TIMEOUT: 60s              # Para PDFs complejos
+PDF_MAX_BYTES: 52428800              # Aumenta a 50MB si necesitas
+
+# Extracción (detecta títulos)
+HEADING_RATIO_H1: 1.8                # Font ratio para H1
+HEADING_RATIO_H2: 1.4                # Font ratio para H2
 ```
 
-Los tests de integración (`repository`, `consumer`) usan [testcontainers-go](https://golang.testcontainers.org/) y requieren Docker. Si el reaper de testcontainers (`ryuk`) no arranca en tu entorno, se pueden correr con:
+## ❓ FAQ
 
-```bash
-TESTCONTAINERS_RYUK_DISABLED=true go test ./...
-```
+**¿Cuánto tarda procesar un PDF?**  
+2-5 segundos típicamente. Ver `/metrics` para latencia real.
 
-## Estructura
+**¿Tamaño máximo?**  
+20MB por defecto. Aumenta `PDF_MAX_BYTES` en docker-compose.yml
 
-```
-cmd/pdf-extractor/   # punto de entrada (wiring + graceful shutdown)
-internal/
-  config/            # carga y validación de variables de entorno
-  consumer/          # consumer de Redis Streams (loop + setup del group)
-  dto/               # DTOs JSON del contrato (entrada/salida)
-  extractor/         # extracción estructurada del PDF
-  markdown/          # mapeo de bloques a Markdown
-  models/            # modelo de persistencia (PdfDocument)
-  mongodb/           # cliente MongoDB (conexión)
-  redis/             # cliente Redis (conexión)
-  repository/        # persistencia (MongoDB)
-  httpserver/        # /health y /metrics (pendiente)
-testdata/            # PDFs de prueba
-research/            # spike de elección de librería PDF
-docs/                # documentación y ADRs
-```
+**¿Dónde se guardan los PDFs procesados?**  
+En MongoDB. Acceso: `docker-compose exec mongo mongosh` → `use pdf-extractor` → `db.documents.find()`
 
-## Documentación
+**¿Qué pasa si un PDF falla?**  
+Reintentos automáticos (3 veces). Si sigue fallando, va a Dead Letter Queue. Ver logs del consumer.
 
-- `docs/`: arquitectura, ADRs y contrato de Redis Streams (pendiente).
-- `docs/PDF_LIBRARY_CHOICE.md`: decisión de la librería de extracción (`ledongthuc/pdf`).
+**¿Puedo procesar más PDFs en paralelo?**  
+Sí, aumenta `WORKER_CONCURRENCY`. Pero sube también CPU/RAM del container.
+
+---
+
+**MIT License** • Procesamiento de documentos a escala  
+[GitHub](https://github.com/PARSE-DOCUMENT-FAST/pdf-extractor) • [Issues](https://github.com/PARSE-DOCUMENT-FAST/pdf-extractor/issues)
