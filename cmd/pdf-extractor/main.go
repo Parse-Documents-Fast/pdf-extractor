@@ -2,16 +2,18 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/PARSE-DOCUMENT-FAST/pdf-extractor/internal/config"
 	"github.com/PARSE-DOCUMENT-FAST/pdf-extractor/internal/consumer"
-	"github.com/PARSE-DOCUMENT-FAST/pdf-extractor/internal/mongodb"
+	"github.com/PARSE-DOCUMENT-FAST/pdf-extractor/internal/httpserver"
 	"github.com/PARSE-DOCUMENT-FAST/pdf-extractor/internal/redis"
-	"github.com/PARSE-DOCUMENT-FAST/pdf-extractor/internal/repository"
 )
 
 func main() {
@@ -33,29 +35,39 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	rdb, err := redis.New(ctx, cfg.RedisURI, cfg.RedisConnectTimeout)
+	rdb, err := redis.New(ctx, cfg.RedisURL, 5*time.Second)
 	if err != nil {
 		return err
 	}
 	defer rdb.Close()
 
-	mclient, err := mongodb.New(ctx, cfg.MongoURI, cfg.MongoConnectTimeout)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
-		defer cancel()
-		_ = mclient.Close(shutdownCtx)
+	srv := httpserver.New(cfg.HTTPAddr)
+	go func() {
+		slog.Info("iniciando servidor http", "addr", cfg.HTTPAddr)
+		if err := srv.Start(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("servidor http fallo", "error", err)
+		}
 	}()
 
-	repo := repository.NewMongoPdfRepository(mclient.Database(cfg.MongoDB), cfg.MongoCollection)
-	if err := repo.EnsureIndex(ctx); err != nil {
-		return err
+	c := consumer.New(rdb, cfg, logger)
+	go func() {
+		if err := c.Run(ctx); err != nil {
+			slog.Error("consumer fallo", "error", err)
+		}
+	}()
+
+	<-ctx.Done()
+	slog.Info("apagando servicio...")
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+	defer cancel()
+
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		slog.Error("error apagando servidor http", "error", err)
 	}
 
-	c := consumer.New(rdb, repo, cfg, logger)
-	return c.Run(ctx)
+	slog.Info("servicio detenido limpiamente")
+	return nil
 }
 
 func newLogger(level string) *slog.Logger {
