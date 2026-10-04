@@ -3,10 +3,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    ports:
-      - "8080:8080"
     environment:
-      - REDIS_URL=redis://redis:6379/0
+      - REDIS_URL=redis://redis-queue:6379/0
       - REDIS_STREAM_INPUT=queue:extraction
       - REDIS_STREAM_OUTPUT=queue:extraction-results
       - REDIS_STREAM_DLQ=queue:extraction-dlq
@@ -14,9 +12,6 @@ services:
       - CONSUMER_NAME=pdf-extractor-1
       - HTTP_ADDR=:8080
       - LOG_LEVEL=info
-    depends_on:
-      redis:
-        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 10s
@@ -27,20 +22,6 @@ services:
     networks:
       - fast_pdf_network
 
-  redis:
-    image: redis:7-alpine
-    ports:
-      - "6379:6379"
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-      start_period: 5s
-    restart: unless-stopped
-    networks:
-      - fast_pdf_network
-
 networks:
   fast_pdf_network:
-    driver: bridge
+    external: true
