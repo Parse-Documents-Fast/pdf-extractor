@@ -12,31 +12,20 @@ type Client struct {
 	*goredis.Client
 }
 
-func OptionsFromURI(uri string, timeout time.Duration) (*goredis.Options, error) {
-	opts, err := goredis.ParseURL(uri)
+func New(ctx context.Context, redisURL string, timeout time.Duration) (*Client, error) {
+	opts, err := goredis.ParseURL(redisURL)
 	if err != nil {
-		return nil, fmt.Errorf("redis: parse uri: %w", err)
-	}
-	opts.DialTimeout = timeout
-	opts.ReadTimeout = timeout
-	opts.WriteTimeout = timeout
-	return opts, nil
-}
-
-func New(ctx context.Context, uri string, timeout time.Duration) (*Client, error) {
-	opts, err := OptionsFromURI(uri, timeout)
-	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("redis: parse url: %w", err)
 	}
 
-	client := goredis.NewClient(opts)
+	rdb := goredis.NewClient(opts)
 
 	pingCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	if err := client.Ping(pingCtx).Err(); err != nil {
-		_ = client.Close()
-		return nil, fmt.Errorf("redis: connect: %w", err)
+
+	if err := rdb.Ping(pingCtx).Err(); err != nil {
+		return nil, fmt.Errorf("redis: ping: %w", err)
 	}
 
-	return &Client{Client: client}, nil
+	return &Client{Client: rdb}, nil
 }

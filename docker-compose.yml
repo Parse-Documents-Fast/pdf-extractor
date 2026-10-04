@@ -1,19 +1,21 @@
-version: '3.8'
-
 services:
-  api:
+  pdf-extractor:
     build:
       context: .
       dockerfile: Dockerfile
     ports:
       - "8080:8080"
     environment:
+      - REDIS_URL=redis://redis:6379/0
+      - REDIS_STREAM_INPUT=queue:extraction
+      - REDIS_STREAM_OUTPUT=queue:extraction-results
+      - REDIS_STREAM_DLQ=queue:extraction-dlq
+      - REDIS_CONSUMER_GROUP=pdf-extractor-group
+      - CONSUMER_NAME=pdf-extractor-1
       - HTTP_ADDR=:8080
       - LOG_LEVEL=info
     depends_on:
       redis:
-        condition: service_healthy
-      mongo:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
@@ -23,35 +25,7 @@ services:
       start_period: 5s
     restart: unless-stopped
     networks:
-      - pdf-network
-
-  consumer:
-    build:
-      context: .
-      dockerfile: Dockerfile.consumer
-    environment:
-      - REDIS_URI=redis://redis:6379
-      - MONGO_URI=mongodb://mongo:27017
-      - MONGO_DB=pdf-extractor
-      - MONGO_COLLECTION=documents
-      - STREAM_EXTRACTION=queue:extraction
-      - STREAM_RESULTS=queue:extraction-results
-      - STREAM_DLQ=queue:extraction-dlq
-      - CONSUMER_GROUP=pdf-extractor-group
-      - CONSUMER_NAME=pdf-extractor-1
-      - WORKER_CONCURRENCY=2
-      - MAX_RETRIES=3
-      - PDF_MAX_BYTES=20971520
-      - EXTRACTION_TIMEOUT=30s
-      - LOG_LEVEL=info
-    depends_on:
-      redis:
-        condition: service_healthy
-      mongo:
-        condition: service_healthy
-    restart: unless-stopped
-    networks:
-      - pdf-network
+      - fast_pdf_network
 
   redis:
     image: redis:7-alpine
@@ -65,40 +39,8 @@ services:
       start_period: 5s
     restart: unless-stopped
     networks:
-      - pdf-network
-
-  mongo:
-    image: mongo:7
-    ports:
-      - "27017:27017"
-    environment:
-      - MONGO_INITDB_ROOT_USERNAME=admin
-      - MONGO_INITDB_ROOT_PASSWORD=password
-    healthcheck:
-      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
-    restart: unless-stopped
-    networks:
-      - pdf-network
-
-  benchmark:
-    image: grafana/k6:latest
-    volumes:
-      - ./docs/benchmark.js:/scripts/benchmark.js:ro
-    environment:
-      - K6_VUS=10
-      - K6_DURATION=30s
-    command: run /scripts/benchmark.js
-    depends_on:
-      api:
-        condition: service_healthy
-    restart: "no"
-    networks:
-      - pdf-network
+      - fast_pdf_network
 
 networks:
-  pdf-network:
+  fast_pdf_network:
     driver: bridge

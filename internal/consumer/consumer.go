@@ -16,34 +16,31 @@ import (
 	"github.com/PARSE-DOCUMENT-FAST/pdf-extractor/internal/dto"
 	"github.com/PARSE-DOCUMENT-FAST/pdf-extractor/internal/extractor"
 	"github.com/PARSE-DOCUMENT-FAST/pdf-extractor/internal/markdown"
-	"github.com/PARSE-DOCUMENT-FAST/pdf-extractor/internal/models"
 	redisclient "github.com/PARSE-DOCUMENT-FAST/pdf-extractor/internal/redis"
-	"github.com/PARSE-DOCUMENT-FAST/pdf-extractor/internal/repository"
 )
 
 var ErrInvalidMessage = errors.New("consumer: mensaje invalido")
 
 type Consumer struct {
 	rdb    *redisclient.Client
-	repo   repository.PdfRepository
 	cfg    config.Config
 	logger *slog.Logger
 }
 
-func New(rdb *redisclient.Client, repo repository.PdfRepository, cfg config.Config, logger *slog.Logger) *Consumer {
+func New(rdb *redisclient.Client, cfg config.Config, logger *slog.Logger) *Consumer {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Consumer{rdb: rdb, repo: repo, cfg: cfg, logger: logger}
+	return &Consumer{rdb: rdb, cfg: cfg, logger: logger}
 }
 
 func (c *Consumer) Run(ctx context.Context) error {
-	if err := EnsureGroup(ctx, c.rdb, c.cfg.StreamExtraction, c.cfg.ConsumerGroup); err != nil {
+	if err := EnsureGroup(ctx, c.rdb, c.cfg.StreamExtraction, c.cfg.RedisConsumerGroup); err != nil {
 		return err
 	}
 
 	var wg sync.WaitGroup
-	for i := 0; i < c.cfg.WorkerConcurrency; i++ {
+	for i := 0; i < c.cfg.WorkerCount; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -59,7 +56,7 @@ func (c *Consumer) Run(ctx context.Context) error {
 func (c *Consumer) workerLoop(ctx context.Context) {
 	for {
 		msgs, err := c.rdb.XReadGroup(ctx, &goredis.XReadGroupArgs{
-			Group:    c.cfg.ConsumerGroup,
+			Group:    c.cfg.RedisConsumerGroup,
 			Consumer: c.cfg.ConsumerName,
 			Streams:  []string{c.cfg.StreamExtraction, ">"},
 			Count:    1,
@@ -79,109 +76,126 @@ func (c *Consumer) workerLoop(ctx context.Context) {
 
 		for _, stream := range msgs {
 			for _, msg := range stream.Messages {
-				if err := c.process(ctx, msg); err != nil {
-					c.logger.Error("consumer: error transitorio", "id", msg.ID, "error", err)
-				}
+				c.processWithRetries(ctx, msg)
 			}
 		}
 	}
 }
 
-func (c *Consumer) process(ctx context.Context, msg goredis.XMessage) error {
+func (c *Consumer) processWithRetries(ctx context.Context, msg goredis.XMessage) {
 	raw, ok := msg.Values[dto.DataField]
 	if !ok {
 		c.logger.Warn("consumer: mensaje sin campo data", "id", msg.ID)
-		return c.ack(ctx, msg.ID)
+		_ = c.ack(ctx, msg.ID)
+		return
 	}
 	data, ok := raw.(string)
 	if !ok {
 		c.logger.Warn("consumer: campo data no es string", "id", msg.ID)
-		return c.ack(ctx, msg.ID)
+		_ = c.ack(ctx, msg.ID)
+		return
 	}
 
 	job, err := parseJob(data)
 	if err != nil {
 		c.logger.Warn("consumer: mensaje invalido", "id", msg.ID, "error", err)
-		return c.ack(ctx, msg.ID)
+		_ = c.ack(ctx, msg.ID)
+		return
 	}
 
+	attempt := 1
+	for {
+		err := c.processOnce(ctx, job)
+		if err == nil {
+			_ = c.ack(ctx, msg.ID)
+			return
+		}
+
+		if isPermanent(err) || attempt >= c.cfg.MaxRetries {
+			c.logger.Error("consumer: fallo permanente o max reintentos alcanzados", "pdf_id", job.PdfID, "attempt", attempt, "error", err)
+			if attempt >= c.cfg.MaxRetries && !isPermanent(err) {
+				c.sendToDLQ(ctx, job, err, attempt)
+			} else {
+				c.publishFailure(ctx, job.PdfID, err)
+			}
+			_ = c.ack(ctx, msg.ID)
+			return
+		}
+
+		c.logger.Warn("consumer: error transitorio, reintentando", "pdf_id", job.PdfID, "attempt", attempt, "error", err)
+		backoff := c.cfg.RetryBackoff * time.Duration(1<<(attempt-1))
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
+		}
+		attempt++
+	}
+}
+
+func (c *Consumer) processOnce(ctx context.Context, job dto.ExtractionRequest) error {
 	pdfData, err := decodeContent(job, c.cfg.PDFMaxBytes)
 	if err != nil {
-		return c.fail(ctx, msg.ID, job.PdfID, err)
+		return err
 	}
 
 	docCtx, cancel := context.WithTimeout(ctx, c.cfg.ExtractionTimeout)
 	defer cancel()
 
-	md, err := c.extractAndMap(docCtx, pdfData)
+	blocks, err := extractor.ExtractStructure(docCtx, pdfData)
 	if err != nil {
-		if isPermanent(err) {
-			return c.fail(ctx, msg.ID, job.PdfID, err)
-		}
 		return err
 	}
 
-	doc := models.PdfDocument{
-		PdfID:           job.PdfID,
-		Filename:        job.Filename,
-		MarkdownContent: md,
-		ExtractedAt:     time.Now().UTC(),
-		Status:          models.StatusSuccess,
-	}
-	if err := c.repo.Upsert(ctx, doc); err != nil {
-		return err
-	}
-
-	result := dto.ExtractionResult{
-		PdfID:           job.PdfID,
-		MarkdownContent: md,
-		Status:          dto.StatusDone,
-	}
-	if err := c.publish(ctx, result); err != nil {
-		return err
-	}
-
-	return c.ack(ctx, msg.ID)
-}
-
-func (c *Consumer) fail(ctx context.Context, msgID, pdfID string, cause error) error {
-	if pdfID != "" {
-		doc := models.PdfDocument{
-			PdfID:       pdfID,
-			Status:      models.StatusFailed,
-			Error:       cause.Error(),
-			ExtractedAt: time.Now().UTC(),
-		}
-		if err := c.repo.Upsert(ctx, doc); err != nil {
-			c.logger.Error("consumer: persistir doc fallido", "pdf_id", pdfID, "error", err)
-		}
-	}
-
-	result := dto.ExtractionResult{
-		PdfID:  pdfID,
-		Status: dto.StatusFailed,
-		Error:  cause.Error(),
-	}
-	if err := c.publish(ctx, result); err != nil {
-		return err
-	}
-	return c.ack(ctx, msgID)
-}
-
-func (c *Consumer) extractAndMap(ctx context.Context, pdfData []byte) (string, error) {
-	blocks, err := extractor.ExtractStructure(ctx, pdfData)
-	if err != nil {
-		return "", err
-	}
 	opts := markdown.Options{
 		HeadingRatioH1: c.cfg.HeadingRatioH1,
 		HeadingRatioH2: c.cfg.HeadingRatioH2,
 		HeadingRatioH3: c.cfg.HeadingRatioH3,
 	}
-	return markdown.MapStructureToMarkdown(blocks, opts), nil
+	md := markdown.MapStructureToMarkdown(blocks, opts)
+
+	result := dto.ExtractionResult{
+		PdfID:           job.PdfID,
+		MarkdownContent: &md,
+		Status:          dto.StatusSuccess,
+		Error:           nil,
+	}
+	return c.publishResult(ctx, result)
 }
 
-func (c *Consumer) publish(ctx context.Context, result dto.ExtractionResult) error {
+func (c *Consumer) publishFailure(ctx context.Context, pdfID string, cause error) {
+	errMsg := cause.Error()
+	result := dto.ExtractionResult{
+		PdfID:           pdfID,
+		MarkdownContent: nil,
+		Status:          dto.StatusFailed,
+		Error:           &errMsg,
+	}
+	_ = c.publishResult(ctx, result)
+}
+
+func (c *Consumer) sendToDLQ(ctx context.Context, job dto.ExtractionRequest, cause error, attempts int) {
+	dlqMsg := dto.DlqMessage{
+		PdfID:           job.PdfID,
+		OriginalMessage: job,
+		Error:           cause.Error(),
+		AttemptCount:    attempts,
+		LastAttemptAt:   time.Now().UTC(),
+	}
+	payload, err := json.Marshal(dlqMsg)
+	if err != nil {
+		c.logger.Error("consumer: serializar dlq", "error", err)
+		return
+	}
+	_ = c.rdb.XAdd(ctx, &goredis.XAddArgs{
+		Stream: c.cfg.StreamDLQ,
+		Values: map[string]interface{}{dto.DataField: string(payload)},
+	}).Err()
+
+	c.publishFailure(ctx, job.PdfID, cause)
+}
+
+func (c *Consumer) publishResult(ctx context.Context, result dto.ExtractionResult) error {
 	payload, err := json.Marshal(result)
 	if err != nil {
 		return fmt.Errorf("consumer: serializar resultado: %w", err)
@@ -193,25 +207,25 @@ func (c *Consumer) publish(ctx context.Context, result dto.ExtractionResult) err
 }
 
 func (c *Consumer) ack(ctx context.Context, id string) error {
-	return c.rdb.XAck(ctx, c.cfg.StreamExtraction, c.cfg.ConsumerGroup, id).Err()
+	return c.rdb.XAck(ctx, c.cfg.StreamExtraction, c.cfg.RedisConsumerGroup, id).Err()
 }
 
-func parseJob(data string) (dto.ExtractionJob, error) {
-	var job dto.ExtractionJob
+func parseJob(data string) (dto.ExtractionRequest, error) {
+	var job dto.ExtractionRequest
 	if err := json.Unmarshal([]byte(data), &job); err != nil {
 		return job, fmt.Errorf("%w: json: %v", ErrInvalidMessage, err)
 	}
 	if job.PdfID == "" {
 		return job, fmt.Errorf("%w: pdf_id vacio", ErrInvalidMessage)
 	}
-	if job.ContentBase64 == "" {
+	if job.ContentB64 == "" {
 		return job, fmt.Errorf("%w: content_base64 vacio", ErrInvalidMessage)
 	}
 	return job, nil
 }
 
-func decodeContent(job dto.ExtractionJob, maxBytes int64) ([]byte, error) {
-	raw, err := base64.StdEncoding.DecodeString(job.ContentBase64)
+func decodeContent(job dto.ExtractionRequest, maxBytes int64) ([]byte, error) {
+	raw, err := base64.StdEncoding.DecodeString(job.ContentB64)
 	if err != nil {
 		return nil, fmt.Errorf("decodificar base64: %w", err)
 	}

@@ -11,23 +11,16 @@ import (
 	"time"
 
 	goredis "github.com/redis/go-redis/v9"
-	tcmongo "github.com/testcontainers/testcontainers-go/modules/mongodb"
 	tcredis "github.com/testcontainers/testcontainers-go/modules/redis"
-	"go.mongodb.org/mongo-driver/v2/bson"
-	"go.mongodb.org/mongo-driver/v2/mongo"
-	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	"github.com/PARSE-DOCUMENT-FAST/pdf-extractor/internal/config"
 	"github.com/PARSE-DOCUMENT-FAST/pdf-extractor/internal/consumer"
 	"github.com/PARSE-DOCUMENT-FAST/pdf-extractor/internal/dto"
-	"github.com/PARSE-DOCUMENT-FAST/pdf-extractor/internal/models"
 	redisclient "github.com/PARSE-DOCUMENT-FAST/pdf-extractor/internal/redis"
-	"github.com/PARSE-DOCUMENT-FAST/pdf-extractor/internal/repository"
 )
 
 type harness struct {
 	rdb *redisclient.Client
-	db  *mongo.Database
 	cfg config.Config
 }
 
@@ -43,25 +36,28 @@ func newHarness(t *testing.T) harness {
 
 	cfg := testConfig()
 
-	if err := rdb.XGroupCreateMkStream(ctx, cfg.StreamExtraction, cfg.ConsumerGroup, "$").Err(); err != nil && !strings.Contains(err.Error(), "BUSYGROUP") {
+	if err := rdb.XGroupCreateMkStream(ctx, cfg.StreamExtraction, cfg.RedisConsumerGroup, "$").Err(); err != nil && !strings.Contains(err.Error(), "BUSYGROUP") {
 		t.Fatalf("XGroupCreateMkStream: %v", err)
 	}
 
-	return harness{rdb: rdb, db: startMongo(t), cfg: cfg}
+	return harness{rdb: rdb, cfg: cfg}
 }
 
 func testConfig() config.Config {
 	return config.Config{
-		StreamExtraction:  "queue:extraction",
-		StreamResults:     "queue:extraction-results",
-		ConsumerGroup:     "pdf-extractor-test-group",
-		ConsumerName:      "pdf-extractor-test-1",
-		WorkerConcurrency: 2,
-		PDFMaxBytes:       1 << 20,
-		ExtractionTimeout: 10 * time.Second,
-		HeadingRatioH1:    1.8,
-		HeadingRatioH2:    1.4,
-		HeadingRatioH3:    1.15,
+		StreamExtraction:   "queue:extraction",
+		StreamResults:      "queue:extraction-results",
+		StreamDLQ:          "queue:extraction-dlq",
+		RedisConsumerGroup: "pdf-extractor-test-group",
+		ConsumerName:       "pdf-extractor-test-1",
+		WorkerCount:        2,
+		MaxRetries:         3,
+		RetryBackoff:       10 * time.Millisecond,
+		PDFMaxBytes:        1 << 20,
+		ExtractionTimeout:  10 * time.Second,
+		HeadingRatioH1:     1.8,
+		HeadingRatioH2:     1.4,
+		HeadingRatioH3:     1.15,
 	}
 }
 
@@ -86,40 +82,9 @@ func startRedis(t *testing.T) string {
 	return uri
 }
 
-func startMongo(t *testing.T) *mongo.Database {
-	t.Helper()
-	ctx := context.Background()
-
-	container, err := tcmongo.Run(ctx, "mongo:7")
-	if err != nil {
-		t.Skipf("no se pudo levantar MongoDB (testcontainers): %v", err)
-	}
-	t.Cleanup(func() {
-		if err := container.Terminate(context.Background()); err != nil {
-			t.Errorf("terminate mongo: %v", err)
-		}
-	})
-
-	connStr, err := container.ConnectionString(ctx)
-	if err != nil {
-		t.Fatalf("connection string: %v", err)
-	}
-
-	client, err := mongo.Connect(options.Client().ApplyURI(connStr))
-	if err != nil {
-		t.Fatalf("mongo.Connect: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = client.Disconnect(context.Background())
-	})
-
-	return client.Database("pdf_extractor_test")
-}
-
 func TestConsumerProcessesJob(t *testing.T) {
 	h := newHarness(t)
-	repo := repository.NewMongoPdfRepository(h.db, "pdf_documents")
-	c := consumer.New(h.rdb, repo, h.cfg, nil)
+	c := consumer.New(h.rdb, h.cfg, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -129,34 +94,29 @@ func TestConsumerProcessesJob(t *testing.T) {
 		<-done
 	}()
 
-	job := dto.ExtractionJob{
-		PdfID:         "pdf-1",
-		Filename:      "simple.pdf",
-		ContentBase64: base64.StdEncoding.EncodeToString(readFixture(t, "simple.pdf")),
+	job := dto.ExtractionRequest{
+		PdfID:      "pdf-1",
+		Filename:   "simple.pdf",
+		ContentB64: base64.StdEncoding.EncodeToString(readFixture(t, "simple.pdf")),
 	}
 	xadd(t, h.rdb, h.cfg.StreamExtraction, job)
 
 	res := waitResult(t, h.rdb, h.cfg.StreamResults, "pdf-1", 15*time.Second)
-	if res.Status != dto.StatusDone {
-		t.Fatalf("status = %q, want done (error=%q)", res.Status, res.Error)
+	if res.Status != dto.StatusSuccess {
+		var errStr string
+		if res.Error != nil {
+			errStr = *res.Error
+		}
+		t.Fatalf("status = %q, want success (error=%q)", res.Status, errStr)
 	}
-	if res.MarkdownContent == "" {
+	if res.MarkdownContent == nil || *res.MarkdownContent == "" {
 		t.Errorf("markdown_content vacio")
-	}
-
-	var doc models.PdfDocument
-	if err := h.db.Collection("pdf_documents").FindOne(context.Background(), bson.M{"pdf_id": "pdf-1"}).Decode(&doc); err != nil {
-		t.Fatalf("FindOne: %v", err)
-	}
-	if doc.Status != models.StatusSuccess {
-		t.Errorf("doc status = %q, want success", doc.Status)
 	}
 }
 
 func TestConsumerCorruptPDF(t *testing.T) {
 	h := newHarness(t)
-	repo := repository.NewMongoPdfRepository(h.db, "pdf_documents")
-	c := consumer.New(h.rdb, repo, h.cfg, nil)
+	c := consumer.New(h.rdb, h.cfg, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -166,10 +126,10 @@ func TestConsumerCorruptPDF(t *testing.T) {
 		<-done
 	}()
 
-	job := dto.ExtractionJob{
-		PdfID:         "pdf-bad",
-		Filename:      "corrupt.pdf",
-		ContentBase64: base64.StdEncoding.EncodeToString(readFixture(t, "corrupt.pdf")),
+	job := dto.ExtractionRequest{
+		PdfID:      "pdf-bad",
+		Filename:   "corrupt.pdf",
+		ContentB64: base64.StdEncoding.EncodeToString(readFixture(t, "corrupt.pdf")),
 	}
 	xadd(t, h.rdb, h.cfg.StreamExtraction, job)
 
@@ -177,12 +137,12 @@ func TestConsumerCorruptPDF(t *testing.T) {
 	if res.Status != dto.StatusFailed {
 		t.Fatalf("status = %q, want failed", res.Status)
 	}
-	if res.Error == "" {
+	if res.Error == nil || *res.Error == "" {
 		t.Errorf("error vacio")
 	}
 }
 
-func xadd(t *testing.T, rdb *redisclient.Client, stream string, job dto.ExtractionJob) {
+func xadd(t *testing.T, rdb *redisclient.Client, stream string, job dto.ExtractionRequest) {
 	t.Helper()
 	payload, err := json.Marshal(job)
 	if err != nil {
