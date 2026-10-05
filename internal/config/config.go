@@ -37,7 +37,7 @@ func Load() (Config, error) {
 		StreamDLQ:          getEnv("REDIS_STREAM_DLQ", "queue:extraction-dlq"),
 		MaxRetries:         getEnvAsInt("REDIS_MAX_RETRIES", 5),
 		RetryBackoff:       getEnvAsDuration("REDIS_RETRY_BACKOFF_MS", 1000*time.Millisecond),
-		HTTPAddr:           getEnv("HTTP_ADDR", ":8080"),
+		HTTPAddr:           getEnv("HTTP_ADDR", ":8000"),
 		ShutdownTimeout:    getEnvAsDuration("HTTP_SHUTDOWN_TIMEOUT", 15*time.Second),
 		ExtractionTimeout:  getEnvAsDuration("PDF_EXTRACTION_TIMEOUT", 30*time.Second),
 		PDFMaxBytes:        getEnvAsInt64("PDF_MAX_BYTES", 20971520),

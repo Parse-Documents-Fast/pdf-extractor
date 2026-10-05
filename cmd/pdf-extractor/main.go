@@ -41,7 +41,7 @@ func run() error {
 	}
 	defer rdb.Close()
 
-	srv := httpserver.New(cfg.HTTPAddr)
+	srv := httpserver.New(cfg)
 	go func() {
 		slog.Info("iniciando servidor http", "addr", cfg.HTTPAddr)
 		if err := srv.Start(); err != nil && !errors.Is(err, http.ErrServerClosed) {

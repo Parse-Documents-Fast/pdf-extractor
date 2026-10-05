@@ -13,9 +13,9 @@ RUN apk --no-cache add ca-certificates curl
 WORKDIR /root/
 COPY --from=builder /build/pdf-extractor /usr/local/bin/
 
-EXPOSE 8080
+EXPOSE 8000
 
 HEALTHCHECK --interval=10s --timeout=5s --retries=3 --start-period=5s \
-    CMD curl -f http://localhost:8080/health || exit 1
+    CMD curl -f http://localhost:8000/health || exit 1
 
 ENTRYPOINT ["pdf-extractor"]

@@ -18,12 +18,13 @@ services:
       - REDIS_STREAM_OUTPUT=queue:extraction-results
       - REDIS_STREAM_DLQ=queue:extraction-dlq
       - REDIS_CONSUMER_GROUP=pdf-extractor-group
-      - HTTP_ADDR=:8080
-      - LOG_LEVEL=INFO
+      - CONSUMER_NAME=pdf-extractor-tp
+      - HTTP_ADDR=:8000
+      - LOG_LEVEL=warn
       - GOMAXPROCS=1
       - WORKER_COUNT=1
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 10s
       timeout: 5s
       retries: 3
