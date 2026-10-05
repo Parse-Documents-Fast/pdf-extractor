@@ -27,7 +27,7 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.RedisConsumerGroup != "pdf-extractor-group" {
 		t.Errorf("RedisConsumerGroup = %q", cfg.RedisConsumerGroup)
 	}
-	if cfg.HTTPAddr != ":8080" {
+	if cfg.HTTPAddr != ":8000" {
 		t.Errorf("HTTPAddr = %q", cfg.HTTPAddr)
 	}
 	if cfg.WorkerCount != 1 {
