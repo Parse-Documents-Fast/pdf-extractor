@@ -18,9 +18,8 @@ services:
       - REDIS_STREAM_OUTPUT=queue:extraction-results
       - REDIS_STREAM_DLQ=queue:extraction-dlq
       - REDIS_CONSUMER_GROUP=pdf-extractor-group
-      - CONSUMER_NAME=pdf-extractor-tp
       - HTTP_ADDR=:8080
-      - LOG_LEVEL=warn
+      - LOG_LEVEL=INFO
       - GOMAXPROCS=1
       - WORKER_COUNT=1
     healthcheck:
