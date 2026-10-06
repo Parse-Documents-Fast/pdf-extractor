@@ -24,6 +24,7 @@ type Config struct {
 	HeadingRatioH2     float64
 	HeadingRatioH3     float64
 	WorkerCount        int
+	WorkerQueueSize    int
 	LogLevel           string
 }
 
@@ -44,7 +45,8 @@ func Load() (Config, error) {
 		HeadingRatioH1:     getEnvAsFloat("FONT_SIZE_HEADING_THRESHOLD", 1.5),
 		HeadingRatioH2:     getEnvAsFloat("FONT_SIZE_SUBHEADING_THRESHOLD", 1.2),
 		HeadingRatioH3:     1.1,
-		WorkerCount:        getEnvAsInt("WORKER_COUNT", 1),
+		WorkerCount:        getEnvAsInt("WORKER_COUNT", 2),
+		WorkerQueueSize:    getEnvAsInt("WORKER_QUEUE_SIZE", 100),
 		LogLevel:           getEnv("LOG_LEVEL", "info"),
 	}
 
