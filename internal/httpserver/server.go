@@ -18,11 +18,33 @@ import (
 	"github.com/PARSE-DOCUMENT-FAST/pdf-extractor/internal/markdown"
 )
 
+type extractJob struct {
+	ctx       context.Context
+	pdfData   []byte
+	pageCount int
+	opts      markdown.Options
+	result    chan extractResult
+}
+
+type extractResult struct {
+	content string
+	err     error
+}
+
 type Server struct {
-	srv *http.Server
+	queue chan extractJob
+	srv   *http.Server
 }
 
 func New(cfg config.Config) *Server {
+	s := &Server{
+		queue: make(chan extractJob, cfg.WorkerQueueSize),
+	}
+
+	for range cfg.WorkerCount {
+		go s.worker()
+	}
+
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
@@ -63,54 +85,87 @@ func New(cfg config.Config) *Server {
 
 		pdfReader, rerr := pdf.NewReader(bytes.NewReader(pdfData), int64(len(pdfData)))
 		if rerr != nil {
-			status := http.StatusUnprocessableEntity
 			title := "Invalid PDF"
 			if errors.Is(rerr, pdf.ErrInvalidPassword) {
 				title = "Password Protected PDF"
 			}
-			writeProblem(w, status, title, rerr.Error(), r.URL.Path)
+			writeProblem(w, http.StatusUnprocessableEntity, title, rerr.Error(), r.URL.Path)
 			return
 		}
 
 		pageCount := pdfReader.NumPage()
 
-		blocks, err := extractor.ExtractStructure(r.Context(), pdfData)
-		if err != nil {
-			status := http.StatusUnprocessableEntity
-			title := "Extraction failed"
-			if errors.Is(err, extractor.ErrCorruptPDF) {
-				title = "Corrupt PDF"
-			} else if errors.Is(err, extractor.ErrNoExtractableText) {
-				title = "No extractable text"
-			} else if errors.Is(err, extractor.ErrPasswordProtected) {
-				title = "Password Protected PDF"
-			}
-			writeProblem(w, status, title, err.Error(), r.URL.Path)
+		result := make(chan extractResult, 1)
+		job := extractJob{
+			ctx:       r.Context(),
+			pdfData:   pdfData,
+			pageCount: pageCount,
+			opts: markdown.Options{
+				HeadingRatioH1: cfg.HeadingRatioH1,
+				HeadingRatioH2: cfg.HeadingRatioH2,
+				HeadingRatioH3: cfg.HeadingRatioH3,
+			},
+			result: result,
+		}
+
+		// Backpressure: cola llena → 503 inmediato, sin bloquear.
+		select {
+		case s.queue <- job:
+		default:
+			writeProblem(w, http.StatusServiceUnavailable,
+				"Service unavailable",
+				"El servidor esta procesando demasiadas solicitudes. Intente nuevamente.",
+				r.URL.Path)
 			return
 		}
 
-		opts := markdown.Options{
-			HeadingRatioH1: cfg.HeadingRatioH1,
-			HeadingRatioH2: cfg.HeadingRatioH2,
-			HeadingRatioH3: cfg.HeadingRatioH3,
+		// Esperar resultado respetando cancelación del request.
+		select {
+		case res := <-result:
+			if res.err != nil {
+				title := "Extraction failed"
+				if errors.Is(res.err, extractor.ErrCorruptPDF) {
+					title = "Corrupt PDF"
+				} else if errors.Is(res.err, extractor.ErrNoExtractableText) {
+					title = "No extractable text"
+				} else if errors.Is(res.err, extractor.ErrPasswordProtected) {
+					title = "Password Protected PDF"
+				}
+				writeProblem(w, http.StatusUnprocessableEntity, title, res.err.Error(), r.URL.Path)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"content":    res.content,
+				"page_count": pageCount,
+			})
+		case <-r.Context().Done():
+			// Cliente desconectado; el worker descartará el resultado cuando llegue.
 		}
-		md := markdown.MapStructureToMarkdown(blocks, opts)
-
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"content":    md,
-			"page_count": pageCount,
-		})
 	})
 
-	return &Server{
-		srv: &http.Server{
-			Addr:         cfg.HTTPAddr,
-			Handler:      mux,
-			ReadTimeout:  10 * time.Second,
-			WriteTimeout: 30 * time.Second,
-		},
+	s.srv = &http.Server{
+		Addr:         cfg.HTTPAddr,
+		Handler:      mux,
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: cfg.ExtractionTimeout + 5*time.Second,
+	}
+
+	return s
+}
+
+// worker es una de las N goroutines fijas que pueden ejecutar ExtractStructure.
+// El runtime HTTP queda completamente separado del algoritmo de extracción.
+func (s *Server) worker() {
+	for job := range s.queue {
+		blocks, err := extractor.ExtractStructure(job.ctx, job.pdfData)
+		if err != nil {
+			job.result <- extractResult{err: err}
+			continue
+		}
+		content := markdown.MapStructureToMarkdown(blocks, job.opts)
+		job.result <- extractResult{content: content}
 	}
 }
 
@@ -135,5 +190,6 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) Shutdown(ctx context.Context) error {
+	close(s.queue)
 	return s.srv.Shutdown(ctx)
 }
