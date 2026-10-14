@@ -54,7 +54,20 @@ func (c *Consumer) Run(ctx context.Context) error {
 }
 
 func (c *Consumer) workerLoop(ctx context.Context) {
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+
+	c.claimPending(ctx)
+
 	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			c.claimPending(ctx)
+		default:
+		}
+
 		msgs, err := c.rdb.XReadGroup(ctx, &goredis.XReadGroupArgs{
 			Group:    c.cfg.RedisConsumerGroup,
 			Consumer: c.cfg.ConsumerName,
@@ -79,6 +92,37 @@ func (c *Consumer) workerLoop(ctx context.Context) {
 				c.processWithRetries(ctx, msg)
 			}
 		}
+	}
+}
+
+func (c *Consumer) claimPending(ctx context.Context) {
+	start := "0-0"
+	for {
+		msgs, _, err := c.rdb.XAutoClaim(ctx, &goredis.XAutoClaimArgs{
+			Stream:   c.cfg.StreamExtraction,
+			Group:    c.cfg.RedisConsumerGroup,
+			Consumer: c.cfg.ConsumerName,
+			MinIdle:  10 * time.Second,
+			Start:    start,
+			Count:    10,
+		}).Result()
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			return
+		}
+
+		for _, msg := range msgs {
+			c.logger.Info("consumer: mensaje huérfano reclamado por xautoclaim", "id", msg.ID, "consumer", c.cfg.ConsumerName)
+			c.processWithRetries(ctx, msg)
+		}
+
+		if len(msgs) == 0 {
+			break
+		}
+		// advance start to last message ID or use "0-0" loop
+		start = msgs[len(msgs)-1].ID
 	}
 }
 
