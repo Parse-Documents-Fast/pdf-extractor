@@ -18,7 +18,7 @@ import (
 
 func main() {
 	if err := run(); err != nil {
-		slog.Error("fatal", "error", err)
+		slog.Error("fatal error", "error", err)
 		os.Exit(1)
 	}
 }
@@ -29,8 +29,13 @@ func run() error {
 		return err
 	}
 
+	rawLogLevel := os.Getenv("LOG_LEVEL")
 	logger := newLogger(cfg.LogLevel)
 	slog.SetDefault(logger)
+
+	if rawLogLevel != "" && rawLogLevel != "debug" && rawLogLevel != "info" && rawLogLevel != "warn" && rawLogLevel != "error" {
+		logger.Warn("invalid log level provided, defaulting to info", "provided", rawLogLevel)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -41,32 +46,32 @@ func run() error {
 	}
 	defer rdb.Close()
 
-	srv := httpserver.New(cfg)
+	srv := httpserver.New(cfg, logger)
 	go func() {
-		slog.Info("iniciando servidor http", "addr", cfg.HTTPAddr)
+		logger.Info("starting http server", "addr", cfg.HTTPAddr)
 		if err := srv.Start(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			slog.Error("servidor http fallo", "error", err)
+			logger.Error("http server failed", "error", err)
 		}
 	}()
 
 	c := consumer.New(rdb, cfg, logger)
 	go func() {
 		if err := c.Run(ctx); err != nil {
-			slog.Error("consumer fallo", "error", err)
+			logger.Error("consumer failed", "error", err)
 		}
 	}()
 
 	<-ctx.Done()
-	slog.Info("apagando servicio...")
+	logger.Info("shutting down service...")
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	defer cancel()
 
 	if err := srv.Shutdown(shutdownCtx); err != nil {
-		slog.Error("error apagando servidor http", "error", err)
+		logger.Error("error shutting down http server", "error", err)
 	}
 
-	slog.Info("servicio detenido limpiamente")
+	logger.Info("service stopped cleanly")
 	return nil
 }
 
