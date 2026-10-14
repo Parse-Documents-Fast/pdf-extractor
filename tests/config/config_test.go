@@ -44,6 +44,28 @@ func TestLoadDefaults(t *testing.T) {
 	}
 }
 
+func TestLoadConsumerNameDefault(t *testing.T) {
+	t.Setenv("CONSUMER_NAME", "")
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.ConsumerName == "" {
+		t.Errorf("ConsumerName is empty, expected hostname default")
+	}
+}
+
+func TestLoadConsumerNameCustom(t *testing.T) {
+	t.Setenv("CONSUMER_NAME", "custom-consumer-name")
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.ConsumerName != "custom-consumer-name" {
+		t.Errorf("ConsumerName = %q, want \"custom-consumer-name\"", cfg.ConsumerName)
+	}
+}
+
 func TestLoadCustomValues(t *testing.T) {
 	t.Setenv("REDIS_URL", "redis://custom:6379/1")
 	t.Setenv("WORKER_COUNT", "4")

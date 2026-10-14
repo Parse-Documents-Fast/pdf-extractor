@@ -32,7 +32,7 @@ func Load() (Config, error) {
 	c := Config{
 		RedisURL:           getEnv("REDIS_URL", "redis://localhost:6379/0"),
 		RedisConsumerGroup: getEnv("REDIS_CONSUMER_GROUP", "pdf-extractor-group"),
-		ConsumerName:       getEnv("CONSUMER_NAME", "pdf-extractor-1"),
+		ConsumerName:       getEnv("CONSUMER_NAME", defaultConsumerName()),
 		StreamExtraction:   getEnv("REDIS_STREAM_INPUT", "queue:extraction"),
 		StreamResults:      getEnv("REDIS_STREAM_OUTPUT", "queue:extraction-results"),
 		StreamDLQ:          getEnv("REDIS_STREAM_DLQ", "queue:extraction-dlq"),
@@ -45,7 +45,7 @@ func Load() (Config, error) {
 		HeadingRatioH1:     getEnvAsFloat("FONT_SIZE_HEADING_THRESHOLD", 1.5),
 		HeadingRatioH2:     getEnvAsFloat("FONT_SIZE_SUBHEADING_THRESHOLD", 1.2),
 		HeadingRatioH3:     1.1,
-		WorkerCount:        getEnvAsInt("WORKER_COUNT", 2),
+		WorkerCount:        getEnvAsInt("WORKER_COUNT", 1),
 		WorkerQueueSize:    getEnvAsInt("WORKER_QUEUE_SIZE", 100),
 		LogLevel:           getEnv("LOG_LEVEL", "info"),
 	}
@@ -54,6 +54,13 @@ func Load() (Config, error) {
 		return c, fmt.Errorf("REDIS_URL es obligatorio")
 	}
 	return c, nil
+}
+
+func defaultConsumerName() string {
+	if h, err := os.Hostname(); err == nil && h != "" {
+		return h
+	}
+	return "pdf-extractor-1"
 }
 
 func getEnv(key, fallback string) string {
