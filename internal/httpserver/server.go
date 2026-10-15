@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -32,13 +33,22 @@ type extractResult struct {
 }
 
 type Server struct {
-	queue chan extractJob
-	srv   *http.Server
+	queue  chan extractJob
+	srv    *http.Server
+	logger *slog.Logger
 }
 
-func New(cfg config.Config) *Server {
+func New(cfg config.Config, loggerOpts ...*slog.Logger) *Server {
+	var logger *slog.Logger
+	if len(loggerOpts) > 0 && loggerOpts[0] != nil {
+		logger = loggerOpts[0]
+	} else {
+		logger = slog.Default()
+	}
+
 	s := &Server{
-		queue: make(chan extractJob, cfg.WorkerQueueSize),
+		queue:  make(chan extractJob, cfg.WorkerQueueSize),
+		logger: logger,
 	}
 
 	for range cfg.WorkerCount {
@@ -56,29 +66,37 @@ func New(cfg config.Config) *Server {
 	mux.Handle("/metrics", promhttp.Handler())
 
 	mux.HandleFunc("/extract", func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
 		if r.Method != http.MethodPost {
+			s.logger.Warn("method not allowed", "method", r.Method, "path", r.URL.Path)
 			writeProblem(w, http.StatusMethodNotAllowed, "Method not allowed", "Only POST is supported", r.URL.Path)
 			return
 		}
 
 		var req dto.ExtractionRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			s.logger.Warn("invalid request json", "error", err)
 			writeProblem(w, http.StatusBadRequest, "Invalid request", "JSON body invalido: "+err.Error(), r.URL.Path)
 			return
 		}
 
+		s.logger.Debug("extract request received", "pdf_id", req.PdfID, "filename", req.Filename)
+
 		if req.ContentB64 == "" {
+			s.logger.Warn("missing content_base64", "pdf_id", req.PdfID)
 			writeProblem(w, http.StatusBadRequest, "Invalid request", "content_base64 es obligatorio", r.URL.Path)
 			return
 		}
 
 		pdfData, err := base64.StdEncoding.DecodeString(req.ContentB64)
 		if err != nil {
+			s.logger.Warn("invalid base64 encoding", "pdf_id", req.PdfID, "error", err)
 			writeProblem(w, http.StatusBadRequest, "Invalid base64", "Error decodificando base64: "+err.Error(), r.URL.Path)
 			return
 		}
 
 		if cfg.PDFMaxBytes > 0 && int64(len(pdfData)) > cfg.PDFMaxBytes {
+			s.logger.Warn("pdf payload too large", "pdf_id", req.PdfID, "size_bytes", len(pdfData), "max_bytes", cfg.PDFMaxBytes)
 			writeProblem(w, http.StatusRequestEntityTooLarge, "Payload too large", "El PDF excede el tamano maximo permitido", r.URL.Path)
 			return
 		}
@@ -88,6 +106,9 @@ func New(cfg config.Config) *Server {
 			title := "Invalid PDF"
 			if errors.Is(rerr, pdf.ErrInvalidPassword) {
 				title = "Password Protected PDF"
+				s.logger.Warn("password protected pdf", "pdf_id", req.PdfID)
+			} else {
+				s.logger.Warn("invalid pdf document", "pdf_id", req.PdfID, "error", rerr)
 			}
 			writeProblem(w, http.StatusUnprocessableEntity, title, rerr.Error(), r.URL.Path)
 			return
@@ -112,6 +133,7 @@ func New(cfg config.Config) *Server {
 		select {
 		case s.queue <- job:
 		default:
+			s.logger.Warn("extraction queue full, service unavailable", "pdf_id", req.PdfID, "queue_len", len(s.queue))
 			writeProblem(w, http.StatusServiceUnavailable,
 				"Service unavailable",
 				"El servidor esta procesando demasiadas solicitudes. Intente nuevamente.",
@@ -126,14 +148,20 @@ func New(cfg config.Config) *Server {
 				title := "Extraction failed"
 				if errors.Is(res.err, extractor.ErrCorruptPDF) {
 					title = "Corrupt PDF"
+					s.logger.Warn("corrupt pdf detected", "pdf_id", req.PdfID)
 				} else if errors.Is(res.err, extractor.ErrNoExtractableText) {
 					title = "No extractable text"
+					s.logger.Warn("no extractable text found", "pdf_id", req.PdfID)
 				} else if errors.Is(res.err, extractor.ErrPasswordProtected) {
 					title = "Password Protected PDF"
+					s.logger.Warn("password protected pdf", "pdf_id", req.PdfID)
+				} else {
+					s.logger.Error("pdf extraction operation failed", "pdf_id", req.PdfID, "error", res.err)
 				}
 				writeProblem(w, http.StatusUnprocessableEntity, title, res.err.Error(), r.URL.Path)
 				return
 			}
+			s.logger.Info("pdf successfully extracted", "pdf_id", req.PdfID, "page_count", pageCount, "duration_ms", time.Since(start).Milliseconds())
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
 			_ = json.NewEncoder(w).Encode(map[string]any{
@@ -141,7 +169,7 @@ func New(cfg config.Config) *Server {
 				"page_count": pageCount,
 			})
 		case <-r.Context().Done():
-			// Cliente desconectado; el worker descartará el resultado cuando llegue.
+			s.logger.Debug("client disconnected before extraction completed", "pdf_id", req.PdfID)
 		}
 	})
 
@@ -155,8 +183,6 @@ func New(cfg config.Config) *Server {
 	return s
 }
 
-// worker es una de las N goroutines fijas que pueden ejecutar ExtractStructure.
-// El runtime HTTP queda completamente separado del algoritmo de extracción.
 func (s *Server) worker() {
 	for job := range s.queue {
 		blocks, err := extractor.ExtractStructure(job.ctx, job.pdfData)

@@ -82,7 +82,7 @@ func (c *Consumer) workerLoop(ctx context.Context) {
 			if errors.Is(err, goredis.Nil) {
 				continue
 			}
-			c.logger.Error("consumer: xreadgroup", "error", err)
+			c.logger.Error("consumer xreadgroup error", "error", err)
 			time.Sleep(time.Second)
 			continue
 		}
@@ -114,7 +114,7 @@ func (c *Consumer) claimPending(ctx context.Context) {
 		}
 
 		for _, msg := range msgs {
-			c.logger.Info("consumer: mensaje huérfano reclamado por xautoclaim", "id", msg.ID, "consumer", c.cfg.ConsumerName)
+			c.logger.Info("claimed orphaned message via xautoclaim", "id", msg.ID, "consumer", c.cfg.ConsumerName)
 			c.processWithRetries(ctx, msg)
 		}
 
@@ -129,20 +129,20 @@ func (c *Consumer) claimPending(ctx context.Context) {
 func (c *Consumer) processWithRetries(ctx context.Context, msg goredis.XMessage) {
 	raw, ok := msg.Values[dto.DataField]
 	if !ok {
-		c.logger.Warn("consumer: mensaje sin campo data", "id", msg.ID)
+		c.logger.Warn("message missing data field", "id", msg.ID)
 		_ = c.ack(ctx, msg.ID)
 		return
 	}
 	data, ok := raw.(string)
 	if !ok {
-		c.logger.Warn("consumer: campo data no es string", "id", msg.ID)
+		c.logger.Warn("data field is not a string", "id", msg.ID)
 		_ = c.ack(ctx, msg.ID)
 		return
 	}
 
 	job, err := parseJob(data)
 	if err != nil {
-		c.logger.Warn("consumer: mensaje invalido", "id", msg.ID, "error", err)
+		c.logger.Warn("invalid message", "id", msg.ID, "error", err)
 		_ = c.ack(ctx, msg.ID)
 		return
 	}
@@ -156,7 +156,7 @@ func (c *Consumer) processWithRetries(ctx context.Context, msg goredis.XMessage)
 		}
 
 		if isPermanent(err) || attempt >= c.cfg.MaxRetries {
-			c.logger.Error("consumer: fallo permanente o max reintentos alcanzados", "pdf_id", job.PdfID, "attempt", attempt, "error", err)
+			c.logger.Error("permanent failure or max retries reached", "pdf_id", job.PdfID, "attempt", attempt, "error", err)
 			if attempt >= c.cfg.MaxRetries && !isPermanent(err) {
 				c.sendToDLQ(ctx, job, err, attempt)
 			} else {
@@ -166,7 +166,7 @@ func (c *Consumer) processWithRetries(ctx context.Context, msg goredis.XMessage)
 			return
 		}
 
-		c.logger.Warn("consumer: error transitorio, reintentando", "pdf_id", job.PdfID, "attempt", attempt, "error", err)
+		c.logger.Warn("transient error, retrying", "pdf_id", job.PdfID, "attempt", attempt, "error", err)
 		backoff := c.cfg.RetryBackoff * time.Duration(1<<(attempt-1))
 		select {
 		case <-ctx.Done():
@@ -228,7 +228,7 @@ func (c *Consumer) sendToDLQ(ctx context.Context, job dto.ExtractionRequest, cau
 	}
 	payload, err := json.Marshal(dlqMsg)
 	if err != nil {
-		c.logger.Error("consumer: serializar dlq", "error", err)
+		c.logger.Error("serialize dlq error", "error", err)
 		return
 	}
 	_ = c.rdb.XAdd(ctx, &goredis.XAddArgs{

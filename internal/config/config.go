@@ -47,13 +47,22 @@ func Load() (Config, error) {
 		HeadingRatioH3:     1.1,
 		WorkerCount:        getEnvAsInt("WORKER_COUNT", 1),
 		WorkerQueueSize:    getEnvAsInt("WORKER_QUEUE_SIZE", 100),
-		LogLevel:           getEnv("LOG_LEVEL", "info"),
+		LogLevel:           parseLogLevel(getEnv("LOG_LEVEL", "info")),
 	}
 
 	if c.RedisURL == "" {
 		return c, fmt.Errorf("REDIS_URL es obligatorio")
 	}
 	return c, nil
+}
+
+func parseLogLevel(val string) string {
+	switch val {
+	case "debug", "info", "warn", "error":
+		return val
+	default:
+		return "info"
+	}
 }
 
 func defaultConsumerName() string {
