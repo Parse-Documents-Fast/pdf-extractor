@@ -5,7 +5,7 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -o pdf-extractor ./cmd/pdf-extractor
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o pdf-extractor ./cmd/pdf-extractor
 
 FROM alpine:3.18
 RUN apk --no-cache add ca-certificates curl
