@@ -25,7 +25,7 @@ Microservicio asíncrono en Go diseñado para extraer Markdown estructurado a pa
 | `HTTP_ADDR` | `:8000` | Dirección del servidor HTTP |
 | `LOG_LEVEL` | `info` | Nivel de log (`debug`, `info`, `warn`, `error`) |
 | `WORKER_COUNT` | `1` | Número de workers locales de extracción |
-| `PDF_MAX_BYTES` | `20971520` | Tamaño máximo permitido de PDF en bytes (20MB) |
+| `MAX_FILE_SIZE_MB` | `20` | Tamaño máximo permitido de PDF en MB |
 
 ## Logging y Privacidad
 

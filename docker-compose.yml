@@ -13,6 +13,7 @@ services:
       - REDIS_CONSUMER_GROUP=pdf-extractor-group
       - CONSUMER_NAME=${PDF_EXTRACTOR_CONSUMER_NAME:-}
       - HTTP_ADDR=:8000
+      - MAX_FILE_SIZE_MB=${MAX_FILE_SIZE_MB:-20}
       - LOG_LEVEL=info
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]

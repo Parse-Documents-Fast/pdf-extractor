@@ -41,7 +41,7 @@ func Load() (Config, error) {
 		HTTPAddr:           getEnv("HTTP_ADDR", ":8000"),
 		ShutdownTimeout:    getEnvAsDuration("HTTP_SHUTDOWN_TIMEOUT", 15*time.Second),
 		ExtractionTimeout:  getEnvAsDuration("PDF_EXTRACTION_TIMEOUT", 30*time.Second),
-		PDFMaxBytes:        getEnvAsInt64("PDF_MAX_BYTES", 20971520),
+		PDFMaxBytes:        getEnvAsInt64("MAX_FILE_SIZE_MB", 20) * 1048576,
 		HeadingRatioH1:     getEnvAsFloat("FONT_SIZE_HEADING_THRESHOLD", 1.5),
 		HeadingRatioH2:     getEnvAsFloat("FONT_SIZE_SUBHEADING_THRESHOLD", 1.2),
 		HeadingRatioH3:     1.1,

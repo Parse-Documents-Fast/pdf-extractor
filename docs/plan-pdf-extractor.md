@@ -86,7 +86,7 @@ HTTP_SHUTDOWN_TIMEOUT=15s
 
 # Procesamiento
 PDF_EXTRACTION_TIMEOUT=30s                    # Timeout por documento
-PDF_MAX_BYTES=20971520                        # 20 MiB (validado por pdf-main, pero validamos de nuevo)
+MAX_FILE_SIZE_MB=20                                  # 20 MiB (validado por pdf-main, pero validamos de nuevo)
 FONT_SIZE_HEADING_THRESHOLD=1.5               # Múltiplo del tamaño predominante
 FONT_SIZE_SUBHEADING_THRESHOLD=1.2
 TABLE_CELL_X_TOLERANCE_PT=5                   # Tolerancia en puntos para alinear columnas
@@ -436,7 +436,7 @@ ENTRYPOINT ["pdf-extractor"]
   - Decodificar JSON
   - Validar campos obligatorios (`pdf_id`, `filename`, `content_base64`)
   - Decodificar base64 de `content_base64` (devolver bytes, no guardar el string)
-  - Verificar tamaño del PDF decodificado (< `PDF_MAX_BYTES`)
+   - Verificar tamaño del PDF decodificado (< `MAX_FILE_SIZE_MB` en bytes)
   - Devolver error tipado si falla
 - [ ] Función `EncodeExtractionResult(result *ExtractionResult) (string, error)`:
   - Codificar a JSON

@@ -69,7 +69,7 @@ func TestLoadConsumerNameCustom(t *testing.T) {
 func TestLoadCustomValues(t *testing.T) {
 	t.Setenv("REDIS_URL", "redis://custom:6379/1")
 	t.Setenv("WORKER_COUNT", "4")
-	t.Setenv("PDF_MAX_BYTES", "1048576")
+	t.Setenv("MAX_FILE_SIZE_MB", "1")
 
 	cfg, err := config.Load()
 	if err != nil {
