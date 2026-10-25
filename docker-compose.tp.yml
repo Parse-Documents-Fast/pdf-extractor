@@ -20,6 +20,7 @@ services:
       - REDIS_CONSUMER_GROUP=pdf-extractor-group
       - CONSUMER_NAME=pdf-extractor-tp
       - HTTP_ADDR=:8000
+      - MAX_FILE_SIZE_MB=${MAX_FILE_SIZE_MB:-20}
       - LOG_LEVEL=warn
       - GOMAXPROCS=1
       - WORKER_COUNT=1
