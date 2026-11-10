@@ -3,7 +3,6 @@ package consumer_test
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -102,15 +101,15 @@ func TestConsumerProcessesJob(t *testing.T) {
 	xadd(t, h.rdb, h.cfg.StreamExtraction, job)
 
 	res := waitResult(t, h.rdb, h.cfg.StreamResults, "pdf-1", 15*time.Second)
-	if res.Status != dto.StatusSuccess {
+	if res.Status != dto.StatusDone {
 		var errStr string
 		if res.Error != nil {
 			errStr = *res.Error
 		}
-		t.Fatalf("status = %q, want success (error=%q)", res.Status, errStr)
+		t.Fatalf("status = %q, want done (error=%q)", res.Status, errStr)
 	}
-	if res.MarkdownContent == nil || *res.MarkdownContent == "" {
-		t.Errorf("markdown_content vacio")
+	if res.Content == nil || *res.Content == "" {
+		t.Errorf("content vacio")
 	}
 }
 
@@ -144,13 +143,13 @@ func TestConsumerCorruptPDF(t *testing.T) {
 
 func xadd(t *testing.T, rdb *redisclient.Client, stream string, job dto.ExtractionRequest) {
 	t.Helper()
-	payload, err := json.Marshal(job)
-	if err != nil {
-		t.Fatalf("marshal job: %v", err)
-	}
 	if err := rdb.XAdd(context.Background(), &goredis.XAddArgs{
 		Stream: stream,
-		Values: map[string]interface{}{dto.DataField: string(payload)},
+		Values: map[string]interface{}{
+			"pdf_id":         job.PdfID,
+			"filename":       job.Filename,
+			"content_base64": job.ContentB64,
+		},
 	}).Err(); err != nil {
 		t.Fatalf("XAdd: %v", err)
 	}
@@ -164,14 +163,21 @@ func waitResult(t *testing.T, rdb *redisclient.Client, stream, pdfID string, tim
 		msgs, err := rdb.XRange(ctx, stream, "-", "+").Result()
 		if err == nil {
 			for _, m := range msgs {
-				s, ok := m.Values[dto.DataField].(string)
-				if !ok {
+				gotID, ok := m.Values["pdf_id"].(string)
+				if !ok || gotID != pdfID {
 					continue
 				}
-				var r dto.ExtractionResult
-				if json.Unmarshal([]byte(s), &r) == nil && r.PdfID == pdfID {
-					return r
+				r := dto.ExtractionResult{PdfID: gotID}
+				if s, ok := m.Values["status"].(string); ok {
+					r.Status = s
 				}
+				if s, ok := m.Values["content"].(string); ok {
+					r.Content = &s
+				}
+				if s, ok := m.Values["error"].(string); ok {
+					r.Error = &s
+				}
+				return r
 			}
 		}
 		time.Sleep(100 * time.Millisecond)

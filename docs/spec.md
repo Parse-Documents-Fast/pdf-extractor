@@ -54,9 +54,8 @@ El servicio publica **dos streams de Redis**, consumidas por `pdf-main`:
 ```json
 {
   "pdf_id": "665f1a2b3c4d5e6f7a8b9c0d",
-  "markdown_content": "# Título del Documento\n\nPrimer párrafo...\n\n| Encabezado 1 | Encabezado 2 |\n|---|---|\n| Celda 1 | Celda 2 |",
-  "status": "success",
-  "error": null
+  "status": "done",
+  "content": "# Título del Documento\n\nPrimer párrafo...\n\n| Encabezado 1 | Encabezado 2 |\n|---|---|\n| Celda 1 | Celda 2 |"
 }
 ```
 
@@ -65,17 +64,16 @@ O en caso de error:
 ```json
 {
   "pdf_id": "665f1a2b3c4d5e6f7a8b9c0d",
-  "markdown_content": null,
   "status": "failed",
-  "error": "ErrNoExtractableText"
+  "error": "{\"type\":\"about:blank\",\"title\":\"Processing failed\",\"status\":422,\"detail\":\"...\",\"instance\":\"/api/pdfs\"}"
 }
 ```
 
 **Campos:**
 - `pdf_id`: mismo que la entrada, para correlación.
-- `markdown_content`: texto Markdown estructurado si `status == "success"`, null si `"failed"`.
-- `status`: literal `"success"` o `"failed"`.
-- `error`: cadena identificando el tipo de error (sentinela Go como string, ej. `"ErrCorruptPDF"`, `"ErrNoExtractableText"`), null si éxito.
+- `status`: literal `"done"` o `"failed"`.
+- `content`: texto Markdown estructurado si `status == "done"`; ausente si `"failed"`.
+- `error`: JSON RFC 9457 serializado como string si `status == "failed"`; ausente si éxito.
 
 **Consumidor:** `pdf-main` lee esta stream vía `XREADGROUP queue:extraction-results pdf-main-extractor-consumer` y procesa el resultado (persistir o registrar fallo).
 

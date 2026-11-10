@@ -19,8 +19,6 @@ import (
 	redisclient "github.com/PARSE-DOCUMENT-FAST/pdf-extractor/internal/redis"
 )
 
-var ErrInvalidMessage = errors.New("consumer: mensaje invalido")
-
 type Consumer struct {
 	rdb    *redisclient.Client
 	cfg    config.Config
@@ -127,22 +125,13 @@ func (c *Consumer) claimPending(ctx context.Context) {
 }
 
 func (c *Consumer) processWithRetries(ctx context.Context, msg goredis.XMessage) {
-	raw, ok := msg.Values[dto.DataField]
-	if !ok {
-		c.logger.Warn("message missing data field", "id", msg.ID)
-		_ = c.ack(ctx, msg.ID)
-		return
+	job := dto.ExtractionRequest{
+		PdfID:      stringField(msg.Values, "pdf_id"),
+		Filename:   stringField(msg.Values, "filename"),
+		ContentB64: stringField(msg.Values, "content_base64"),
 	}
-	data, ok := raw.(string)
-	if !ok {
-		c.logger.Warn("data field is not a string", "id", msg.ID)
-		_ = c.ack(ctx, msg.ID)
-		return
-	}
-
-	job, err := parseJob(data)
-	if err != nil {
-		c.logger.Warn("invalid message", "id", msg.ID, "error", err)
+	if job.PdfID == "" || job.ContentB64 == "" {
+		c.logger.Warn("invalid message", "id", msg.ID)
 		_ = c.ack(ctx, msg.ID)
 		return
 	}
@@ -199,23 +188,22 @@ func (c *Consumer) processOnce(ctx context.Context, job dto.ExtractionRequest) e
 	md := markdown.MapStructureToMarkdown(blocks, opts)
 
 	result := dto.ExtractionResult{
-		PdfID:           job.PdfID,
-		MarkdownContent: &md,
-		Status:          dto.StatusSuccess,
-		Error:           nil,
+		PdfID:   job.PdfID,
+		Status:  dto.StatusDone,
+		Content: &md,
 	}
 	return c.publishResult(ctx, result)
 }
 
 func (c *Consumer) publishFailure(ctx context.Context, pdfID string, cause error) {
-	errMsg := cause.Error()
 	result := dto.ExtractionResult{
-		PdfID:           pdfID,
-		MarkdownContent: nil,
-		Status:          dto.StatusFailed,
-		Error:           &errMsg,
+		PdfID:  pdfID,
+		Status: dto.StatusFailed,
+		Error:  failureProblem(cause),
 	}
-	_ = c.publishResult(ctx, result)
+	if err := c.publishResult(ctx, result); err != nil {
+		c.logger.Error("publish failure result", "pdf_id", pdfID, "error", err)
+	}
 }
 
 func (c *Consumer) sendToDLQ(ctx context.Context, job dto.ExtractionRequest, cause error, attempts int) {
@@ -240,13 +228,19 @@ func (c *Consumer) sendToDLQ(ctx context.Context, job dto.ExtractionRequest, cau
 }
 
 func (c *Consumer) publishResult(ctx context.Context, result dto.ExtractionResult) error {
-	payload, err := json.Marshal(result)
-	if err != nil {
-		return fmt.Errorf("consumer: serializar resultado: %w", err)
+	values := map[string]interface{}{
+		"pdf_id": result.PdfID,
+		"status": result.Status,
+	}
+	if result.Content != nil {
+		values["content"] = *result.Content
+	}
+	if result.Error != nil {
+		values["error"] = *result.Error
 	}
 	return c.rdb.XAdd(ctx, &goredis.XAddArgs{
 		Stream: c.cfg.StreamResults,
-		Values: map[string]interface{}{dto.DataField: string(payload)},
+		Values: values,
 	}).Err()
 }
 
@@ -254,18 +248,31 @@ func (c *Consumer) ack(ctx context.Context, id string) error {
 	return c.rdb.XAck(ctx, c.cfg.StreamExtraction, c.cfg.RedisConsumerGroup, id).Err()
 }
 
-func parseJob(data string) (dto.ExtractionRequest, error) {
-	var job dto.ExtractionRequest
-	if err := json.Unmarshal([]byte(data), &job); err != nil {
-		return job, fmt.Errorf("%w: json: %v", ErrInvalidMessage, err)
+func stringField(values map[string]interface{}, key string) string {
+	s, _ := values[key].(string)
+	return s
+}
+
+func failureProblem(cause error) *string {
+	problem := struct {
+		Type     string `json:"type"`
+		Title    string `json:"title"`
+		Status   int    `json:"status"`
+		Detail   string `json:"detail"`
+		Instance string `json:"instance"`
+	}{
+		Type:     "about:blank",
+		Title:    "Processing failed",
+		Status:   422,
+		Detail:   cause.Error(),
+		Instance: "/api/pdfs",
 	}
-	if job.PdfID == "" {
-		return job, fmt.Errorf("%w: pdf_id vacio", ErrInvalidMessage)
+	payload, err := json.Marshal(problem)
+	if err != nil {
+		return nil
 	}
-	if job.ContentB64 == "" {
-		return job, fmt.Errorf("%w: content_base64 vacio", ErrInvalidMessage)
-	}
-	return job, nil
+	s := string(payload)
+	return &s
 }
 
 func decodeContent(job dto.ExtractionRequest, maxBytes int64) ([]byte, error) {

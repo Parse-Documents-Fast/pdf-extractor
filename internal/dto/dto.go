@@ -2,11 +2,13 @@ package dto
 
 import "time"
 
+// DataField is only used by the DLQ stream. The job and result streams use
+// flat fields (see pdf-docs/contracts/contracts-extractor.md).
 const DataField = "data"
 
 const (
-	StatusSuccess = "success"
-	StatusFailed  = "failed"
+	StatusDone   = "done"
+	StatusFailed = "failed"
 )
 
 type ExtractionRequest struct {
@@ -16,10 +18,11 @@ type ExtractionRequest struct {
 }
 
 type ExtractionResult struct {
-	PdfID           string  `json:"pdf_id"`
-	MarkdownContent *string `json:"markdown_content"`
-	Status          string  `json:"status"`
-	Error           *string `json:"error"`
+	PdfID   string  `json:"pdf_id"`
+	Status  string  `json:"status"`
+	Content *string `json:"content,omitempty"`
+	// Error carries the RFC 9457 problem serialized as JSON.
+	Error *string `json:"error,omitempty"`
 }
 
 type DlqMessage struct {
